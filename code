@@ -1,0 +1,302 @@
+# -*- coding: utf-8 -*-
+"""
+Reproducible analysis code for:
+- 3D geometric model of femoral anteversion and flexion-dependent load direction
+- Structural support index S = | n_femur · n_load |
+- Fig1 (S heatmap averaged over CCD angles)
+- Fig2 (ΔS = S(40°) - S(0°) heatmap across CCD)
+- Key numeric checks reported in Results
+- Restoration onset angles where S(40°) > S(20°)
+
+Dependencies:
+  numpy, matplotlib
+
+Run:
+  python analysis_hip_geometry.py
+"""
+
+from __future__ import annotations
+import os
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def deg2rad(deg: float) -> float:
+    return deg * np.pi / 180.0
+
+
+def normalize(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    if n == 0:
+        raise ValueError("Zero-length vector cannot be normalized.")
+    return v / n
+
+
+# -----------------------------
+# Rotation matrices (pelvis-fixed)
+# -----------------------------
+def R_CCD(gamma_rad: float) -> np.ndarray:
+    """
+    Coronal-plane inclination corresponding to CCD angle.
+    Rotation about pelvis y-axis.
+    """
+    c, s = np.cos(gamma_rad), np.sin(gamma_rad)
+    return np.array([[ c, 0.0,  s],
+                     [0.0, 1.0, 0.0],
+                     [-s, 0.0,  c]], dtype=float)
+
+
+def R_ante(alpha_rad: float) -> np.ndarray:
+    """
+    Femoral anteversion as axial rotation about pelvis z-axis.
+    """
+    c, s = np.cos(alpha_rad), np.sin(alpha_rad)
+    return np.array([[ c, -s, 0.0],
+                     [ s,  c, 0.0],
+                     [0.0, 0.0, 1.0]], dtype=float)
+
+
+def R_x(theta_rad: float) -> np.ndarray:
+    """
+    Flexion-dependent load rotation about pelvis x-axis.
+    """
+    c, s = np.cos(theta_rad), np.sin(theta_rad)
+    return np.array([[1.0, 0.0, 0.0],
+                     [0.0,  c, -s],
+                     [0.0,  s,  c]], dtype=float)
+
+
+# -----------------------------
+# Model definitions
+# -----------------------------
+N0 = np.array([1.0, 0.0, 0.0], dtype=float)       # reference neck axis
+N_LOAD0 = np.array([0.0, 0.0, -1.0], dtype=float) # neutral load direction
+
+
+def n_femur(alpha_rad: float, gamma_rad: float) -> np.ndarray:
+    """
+    n_femur(α,γ) = R_ante(α) * R_CCD(γ) * n0
+    """
+    v = R_ante(alpha_rad) @ (R_CCD(gamma_rad) @ N0)
+    return normalize(v)
+
+
+def n_load(theta_rad: float) -> np.ndarray:
+    """
+    n_load(θ) = R_x(θ) * n_load0
+    """
+    v = R_x(theta_rad) @ N_LOAD0
+    return normalize(v)
+
+
+def S(alpha_rad: float, gamma_rad: float, theta_rad: float) -> float:
+    """
+    Structural support index:
+      S(α,γ,θ) = | n_femur(α,γ) · n_load(θ) |
+    """
+    nf = n_femur(alpha_rad, gamma_rad)
+    nl = n_load(theta_rad)
+    return float(abs(np.dot(nf, nl)))
+
+
+# -----------------------------
+# Parameter grids (match Methods)
+# -----------------------------
+ALPHA_DEG = np.array([0, 10, 20, 30, 40], dtype=int)
+GAMMA_DEG = np.array([115, 125, 135], dtype=int)
+THETA_DEG = np.arange(0, 91, 1, dtype=int)
+
+ALPHA_RAD = np.array([deg2rad(a) for a in ALPHA_DEG], dtype=float)
+GAMMA_RAD = np.array([deg2rad(g) for g in GAMMA_DEG], dtype=float)
+THETA_RAD = np.array([deg2rad(t) for t in THETA_DEG], dtype=float)
+
+
+# -----------------------------
+# Core computations
+# -----------------------------
+def compute_S_grid() -> np.ndarray:
+    """
+    Returns S_grid with shape:
+      [n_alpha, n_gamma, n_theta]
+    """
+    S_grid = np.zeros((len(ALPHA_RAD), len(GAMMA_RAD), len(THETA_RAD)), dtype=float)
+    for ia, a in enumerate(ALPHA_RAD):
+        for ig, g in enumerate(GAMMA_RAD):
+            for it, t in enumerate(THETA_RAD):
+                S_grid[ia, ig, it] = S(a, g, t)
+    return S_grid
+
+
+def compute_fig1_map(S_grid: np.ndarray) -> np.ndarray:
+    """
+    Fig1 map: average S over gamma for each (alpha, theta).
+    Output shape [n_alpha, n_theta]
+    """
+    return S_grid.mean(axis=1)
+
+
+def compute_fig2_map(S_grid: np.ndarray) -> np.ndarray:
+    """
+    Fig2 map: ΔS = S(40°,γ,θ) - S(0°,γ,θ)
+    Output shape [n_gamma, n_theta]
+    """
+    idx_a0 = np.where(ALPHA_DEG == 0)[0][0]
+    idx_a40 = np.where(ALPHA_DEG == 40)[0][0]
+    return S_grid[idx_a40, :, :] - S_grid[idx_a0, :, :]
+
+
+def restoration_onset_angles(S_grid: np.ndarray) -> dict[int, int | None]:
+    """
+    Restoration onset defined as:
+      S(40°,γ,θ) > S(20°,γ,θ)
+    Return {gamma_deg: onset_theta_deg or None}
+    """
+    idx_a20 = np.where(ALPHA_DEG == 20)[0][0]
+    idx_a40 = np.where(ALPHA_DEG == 40)[0][0]
+    onset = {}
+    for ig, gdeg in enumerate(GAMMA_DEG):
+        found = None
+        for it, tdeg in enumerate(THETA_DEG):
+            if S_grid[idx_a40, ig, it] > S_grid[idx_a20, ig, it]:
+                found = int(tdeg)
+                break
+        onset[int(gdeg)] = found
+    return onset
+
+
+# -----------------------------
+# Numeric checks for Results
+# -----------------------------
+def print_key_checks(S_grid: np.ndarray) -> None:
+    idx_g115 = np.where(GAMMA_DEG == 115)[0][0]
+    idx_g125 = np.where(GAMMA_DEG == 125)[0][0]
+    idx_g135 = np.where(GAMMA_DEG == 135)[0][0]
+
+    idx_a0 = np.where(ALPHA_DEG == 0)[0][0]
+    idx_a20 = np.where(ALPHA_DEG == 20)[0][0]
+    idx_a40 = np.where(ALPHA_DEG == 40)[0][0]
+
+    def val(a_idx, g_idx, theta_deg):
+        it = np.where(THETA_DEG == theta_deg)[0][0]
+        return float(S_grid[a_idx, g_idx, it])
+
+    print("\nKey checks (should match the Results text if using same model):")
+    # Neutral flexion invariance (theta=0)
+    for g_idx, gdeg in [(idx_g115, 115), (idx_g125, 125), (idx_g135, 135)]:
+        s0 = val(idx_a0, g_idx, 0)
+        s20 = val(idx_a20, g_idx, 0)
+        s40 = val(idx_a40, g_idx, 0)
+        print(f"theta=0°, gamma={gdeg}°: S(a0)={s0:.3f}, S(a20)={s20:.3f}, S(a40)={s40:.3f}")
+
+    # Representative examples (gamma=125°)
+    for th in [10, 20, 30]:
+        s0 = val(idx_a0, idx_g125, th)
+        s20 = val(idx_a20, idx_g125, th)
+        s40 = val(idx_a40, idx_g125, th)
+        print(f"gamma=125°, theta={th}°: S(0)={s0:.3f}, S(20)={s20:.3f}, S(40)={s40:.3f}")
+
+    # Mid-range flexion example (theta=55°, gamma=125°) with higher precision
+    s0 = val(idx_a0, idx_g125, 55)
+    s20 = val(idx_a20, idx_g125, 55)
+    s40 = val(idx_a40, idx_g125, 55)
+    print(f"gamma=125°, theta=55°: S(0)={s0:.6f}, S(20)={s20:.6f}, S(40)={s40:.6f}")
+
+    # Deep flexion example (theta=75°, gamma=125°) with higher precision
+    s0 = val(idx_a0, idx_g125, 75)
+    s20 = val(idx_a20, idx_g125, 75)
+    s40 = val(idx_a40, idx_g125, 75)
+    print(f"gamma=125°, theta=75°: S(0)={s0:.6f}, S(20)={s20:.6f}, S(40)={s40:.6f}")
+
+
+# -----------------------------
+# Plotting: Fig1 and Fig2
+# -----------------------------
+def plot_fig1(S_map: np.ndarray, outdir: str) -> str:
+    """
+    Fig1: heatmap of S averaged over gamma. y=alpha, x=theta
+    """
+    plt.figure()
+    plt.imshow(
+        S_map,
+        aspect="auto",
+        origin="lower",
+        extent=[THETA_DEG.min(), THETA_DEG.max(), ALPHA_DEG.min(), ALPHA_DEG.max()],
+    )
+    plt.xlabel("Hip flexion angle (deg)")
+    plt.ylabel("Femoral anteversion (deg)")
+    plt.colorbar(label="Structural support index S (mean over CCD)")
+    plt.tight_layout()
+
+    path = os.path.join(outdir, "Fig1_S_heatmap_mean_over_CCD.png")
+    plt.savefig(path, dpi=300)
+    plt.close()
+    return path
+
+
+def plot_fig2(DeltaS: np.ndarray, outdir: str) -> str:
+    """
+    Fig2: heatmap of ΔS across CCD (y=gamma) and flexion (x=theta)
+          ΔS = S(40°) - S(0°)
+    """
+    plt.figure()
+    plt.imshow(
+        DeltaS,
+        aspect="auto",
+        origin="lower",
+        extent=[THETA_DEG.min(), THETA_DEG.max(), GAMMA_DEG.min(), GAMMA_DEG.max()],
+    )
+    plt.xlabel("Hip flexion angle (deg)")
+    plt.ylabel("Neck–shaft (CCD) angle (deg)")
+    plt.colorbar(label="ΔS = S(40°) − S(0°)")
+    plt.tight_layout()
+
+    path = os.path.join(outdir, "Fig2_DeltaS_heatmap_across_CCD.png")
+    plt.savefig(path, dpi=300)
+    plt.close()
+    return path
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main() -> None:
+    outdir = "outputs"
+    os.makedirs(outdir, exist_ok=True)
+
+    # Compute full grid
+    S_grid = compute_S_grid()
+
+    # Print checks used in Results
+    print_key_checks(S_grid)
+
+    # Restoration onset angles
+    onset = restoration_onset_angles(S_grid)
+    print("\nRestoration onset (first theta where S(40°) > S(20°)):")
+    for gdeg in GAMMA_DEG:
+        v = onset[int(gdeg)]
+        print(f"gamma={int(gdeg)}° -> onset theta={v}°" if v is not None else f"gamma={int(gdeg)}° -> no onset within 0–90°")
+
+    # Build and save figures
+    S_map = compute_fig1_map(S_grid)
+    DeltaS = compute_fig2_map(S_grid)
+
+    fig1_path = plot_fig1(S_map, outdir)
+    fig2_path = plot_fig2(DeltaS, outdir)
+
+    print("\nSaved figures:")
+    print(f"  {fig1_path}")
+    print(f"  {fig2_path}")
+
+    # Optional: save raw arrays for reproducibility
+    np.save(os.path.join(outdir, "S_grid_alpha_gamma_theta.npy"), S_grid)
+    np.save(os.path.join(outdir, "Fig1_S_map_alpha_theta.npy"), S_map)
+    np.save(os.path.join(outdir, "Fig2_DeltaS_gamma_theta.npy"), DeltaS)
+    print("\nSaved arrays (.npy) in outputs/ for full reproducibility.")
+
+
+if __name__ == "__main__":
+    main()
